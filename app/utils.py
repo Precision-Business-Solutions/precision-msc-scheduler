@@ -5,7 +5,7 @@ time_slots = {
         "11:00 AM": None,
         "12:00 PM": "LUNCH",
         "1:00 PM": None,
-        "2:00 PM": None,
+        "2:00 PM": "BREAK",
         "3:00 PM": None,
         "4:00 PM": None,
     },
@@ -15,8 +15,7 @@ time_slots = {
         "11:00 AM": None,
         "12:00 PM": "LUNCH",
         "1:00 PM": None,
-        "2:00 PM": "BREAK",
-        "3:00 PM": None,
-        "4:00 PM": None,
+        "2:00 PM": "BREAK"
     }
 }
+
