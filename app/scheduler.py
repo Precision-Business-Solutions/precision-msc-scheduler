@@ -1,12 +1,10 @@
 import pandas as pd
-import numpy as np
+import random
 from app.utils import time_slots
 
 
-# ----------------------------------------------------------
-#   Interpret a supplier request into a rep candidate list
-# ----------------------------------------------------------
 def resolve_request(request, reps_df):
+    '''Interpret a supplier request into a rep candidate list'''
     req = str(request).strip()
 
     # 1. exact rep name
@@ -24,100 +22,70 @@ def resolve_request(request, reps_df):
     if len(cat) > 0:
         return cat.sort_values("Cat Rank").copy(), "category"
 
-    # 4. no match
     return pd.DataFrame(), "none"
 
 
-# ----------------------------------------------------------
-#   Determine specificity score for supplier ordering
-#   rep < subcat < cat < none
-# ----------------------------------------------------------
 def request_specificity(req_list, reps_df):
-    best = 3  # worst
-
+    '''Determine specificity score (rep < subcat < cat < none)'''
+    best = 3
     for req in req_list:
         _, rtype = resolve_request(req, reps_df)
-
         if rtype == "rep":
             return 0
         if rtype == "subcat":
             best = min(best, 1)
-        elif rtype == "category":
+        if rtype == "category":
             best = min(best, 2)
-
     return best
 
 
-# ----------------------------------------------------------
-#   Build STRATIFIED RANDOM timeslot order per rep
-# ----------------------------------------------------------
-def build_random_timeslot_index(reps_df):
-    rep_timeslot_order = {}
+def build_random_timeslot_order():
+    '''
+    Build a randomized list of all available timeslots per supplier.
+    Avoids same day clustering.
+    '''
+    all_slots = []
+    for day, slots in time_slots.items():
+        for slot, state in slots.items():
+            if state not in ("LUNCH", "BREAK"):
+                all_slots.append((day, slot))
 
-    for rep in reps_df["Sales Rep."]:
-        rep_timeslot_order[rep] = {}
-
-        for day, slot_map in time_slots.items():
-            slots = [slot for slot, state in slot_map.items() if state not in ("LUNCH", "BREAK")]
-            np.random.shuffle(slots)
-            rep_timeslot_order[rep][day] = slots
-
-    return rep_timeslot_order
+    random.shuffle(all_slots)
+    return all_slots
 
 
-# ----------------------------------------------------------
-#   Balanced + Randomized timeslot finder
-# ----------------------------------------------------------
-def _find_balanced_timeslot(
-    supplier,
-    rep,
-    supplier_rows,
-    rep_avail,
-    rep_timeslot_order,
-    day_start_idx
-):
+
+def find_randomized_slot(supplier, rep, supplier_rows, rep_avail, randomized_slots):
     supplier_used = {
         (row["day"], row["timeslot"])
         for row in supplier_rows
         if row["supplier"] == supplier
     }
 
-    days = list(time_slots.keys())
-    rotated = days[day_start_idx:] + days[:day_start_idx]
+    for (day, slot) in randomized_slots:
 
-    for day in rotated:
+        if (day, slot) in supplier_used:
+            continue
 
-        # iterate in rep-specific random order for this day
-        for slot in rep_timeslot_order[rep][day]:
-
-            # skip if system says unavailable
-            if time_slots[day][slot] in ("LUNCH", "BREAK"):
-                continue
-
-            if (day, slot) in supplier_used:
-                continue
-
-            if rep_avail[rep][day][slot] is True:
-                return day, slot
+        if rep_avail[rep][day][slot] is True:
+            return day, slot
 
     return None, None
 
 
 # ----------------------------------------------------------
-#              MAIN SCHEDULER 
+#                     MAIN SCHEDULER 
 # ----------------------------------------------------------
 def run_scheduler(
-    suppliers_df,
-    reps_df,
-    preferences,       # list of requests per supplier
-    max_meetings_rep,
-    max_peak,
-    max_acc
-):
+        suppliers_df,
+        reps_df,
+        preferences,
+        max_meetings_rep,
+        max_peak,
+        max_acc
+    ):
 
-    # ------------------------------------------------------
-    # Build rep availability map
-    # ------------------------------------------------------
+    # build rep availability
     rep_avail = {
         rep: {
             day: {slot: (blocked is None) for slot, blocked in slot_map.items()}
@@ -126,11 +94,6 @@ def run_scheduler(
         for rep in reps_df["Sales Rep."]
     }
 
-    # ------------------------------------------------------
-    # Randomized timeslot index (STRATIFIED by day)
-    # ------------------------------------------------------
-    rep_timeslot_order = build_random_timeslot_index(reps_df)
-
     rep_meeting_count = {rep: 0 for rep in reps_df["Sales Rep."]}
     supplier_meeting_count = {}
 
@@ -138,17 +101,13 @@ def run_scheduler(
     rep_rows = []
     supplier_summary = {}
 
-    # ------------------------------------------------------
-    # Compute request specificity per supplier
-    # ------------------------------------------------------
+    # compute request specificity
     suppliers_df = suppliers_df.copy()
     suppliers_df["Specificity"] = suppliers_df["Supplier"].apply(
         lambda s: request_specificity(preferences[s], reps_df)
     )
 
-    # ------------------------------------------------------
-    # Peak first, then specificity
-    # ------------------------------------------------------
+    # order suppliers
     ordered_suppliers = suppliers_df.sort_values(
         by=["Type", "Specificity"],
         key=lambda col: (
@@ -158,18 +117,20 @@ def run_scheduler(
         )
     )
 
-    suppliers_list = ordered_suppliers["Supplier"].tolist()
+    # ------------------------------------------------------
+    # NEW: Build randomized slot order ONCE PER SUPPLIER
+    # ------------------------------------------------------
 
-    # rotating start index for day ordering
-    supplier_day_start_index = {
-        supplier: (i % len(time_slots))
-        for i, supplier in enumerate(suppliers_list)
+    randomized_slot_map = {
+        supp["Supplier"]: build_random_timeslot_order()
+        for _, supp in ordered_suppliers.iterrows()
     }
 
     # ------------------------------------------------------
     # Begin scheduling
     # ------------------------------------------------------
     for _, supp in ordered_suppliers.iterrows():
+
         supplier = supp["Supplier"]
         booth = supp["Booth #"]
         s_type = supp["Type"]
@@ -185,9 +146,9 @@ def run_scheduler(
             "category_counts": {}
         }
 
-        day_start_idx = supplier_day_start_index[supplier]
+        slot_order = randomized_slot_map[supplier]
 
-        # iterate in request priority order
+        # iterate in request order
         for request in req_list:
 
             if supplier_meeting_count[supplier] >= cap:
@@ -202,20 +163,20 @@ def run_scheduler(
             chosen_slot = None
             category_label = None
 
-            # iterate potential reps in rank order
+            # try each candidate rep
             for _, rep_row in rep_candidates.iterrows():
+
                 rep = rep_row["Sales Rep."]
 
                 if rep_meeting_count[rep] >= max_meetings_rep:
                     continue
 
-                day, slot = _find_balanced_timeslot(
+                day, slot = find_randomized_slot(
                     supplier,
                     rep,
                     supplier_rows,
                     rep_avail,
-                    rep_timeslot_order,
-                    day_start_idx
+                    slot_order
                 )
 
                 if day and slot:
@@ -225,7 +186,7 @@ def run_scheduler(
                     break
 
             if assigned_rep:
-                # final category label
+                # figure category label
                 if req_type == "rep":
                     category_label = rep_row["Category"]
                 elif req_type == "subcat":
