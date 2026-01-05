@@ -32,7 +32,7 @@ def main():
         #### Source Data and Definitions
 
         Supplier type and opportunity data come from the Supplier Growth Forum model outputs.  
-        The list of attending Sales Representatives comes from the MSC invite list provided Dec 23.  
+        The list of attending Sales Representatives comes from the MSC invite list provided by Leah Bacon on Dec. 23rd.  
         Supplier meeting requests come from the Meeting Tracker and include each supplier's meeting number, topic, and preferred attendee type or region.
 
         Request cleaning follows these principles:  
@@ -50,11 +50,9 @@ def main():
         When a rep appears too often, controlled substitutions are made:  
         - Key Leaders may be replaced with Region or District Leaders in the same segment  
         - Region Leaders may be replaced with District Leaders in the same region  
-        - District Leaders may be swapped with another District Leader in the same region Reps that cannot be replaced are removed and marked as unavailable.
+        - District Leaders may be swapped with another District Leader in the same region, Reps that cannot be replaced are removed and marked as unavailable.
 
-        Finally, suppliers are scheduled with Peak suppliers placed first, then Accelerating.  
-        Meetings are attempted in priority order and placed only when all reps are available, the supplier is free, and no workload limits are exceeded.  
-        Multiple internal configurations are tested automatically, and the solution with the fewest unscheduled meetings is returned.
+        Finally, suppliers are scheduled with Peak suppliers placed first, then Accelerating. Meetings are attempted in priority order and placed only when all reps are available, the supplier is free, and no workload limits are exceeded. Multiple internal configurations are tested automatically, and the solution with the fewest unscheduled meetings is returned.
 
         All processing happens locally in your browser session. 
 
@@ -244,3 +242,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
