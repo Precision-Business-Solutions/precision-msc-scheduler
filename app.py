@@ -57,7 +57,7 @@ def main():
         All processing happens locally in your browser session. 
 
         #### Support
-        For questions or assistance, contact **Precision Business Solutions**  
+        For questions or assistance, contact *Kameel Dossal* or *Precision Business Solutions*  
         """
     )
 
@@ -242,5 +242,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
