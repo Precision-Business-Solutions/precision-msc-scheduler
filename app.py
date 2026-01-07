@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import io
 
 from app.layout import render_header
 from app.parsers import parse_meeting_organizer
@@ -8,7 +9,148 @@ from app.html_renderer import (
     render_supplier_html,
     render_rep_html,
     build_combined_html,
+    render_request_summary_table
 )
+
+def attach_substitutions(supplier_sched, supplier_summary):
+    """
+    Add a 'substitutions' column to supplier_sched by mapping:
+    (supplier, request_name) -> list of unavailable reps
+    """
+    subs_map = {}
+    for supp, summary in supplier_summary.items():
+        subs = summary.get("substitutions", {})
+        for req_name, subs_list in subs.items():
+            subs_map[(supp, req_name)] = ", ".join(subs_list)
+
+    supplier_sched = supplier_sched.copy()
+    supplier_sched["substitutions"] = supplier_sched.apply(
+        lambda r: subs_map.get((r["supplier"], r["category"]), ""),
+        axis=1
+    )
+    return supplier_sched
+
+
+def create_download_workbook(supplier_sched, rep_sched, supplier_summary):
+    """
+    Build a formatted Excel workbook with:
+    - Suppliers sheet (with substitutions)
+    - Representatives sheet
+    """
+
+    output = io.BytesIO()
+
+    # Merge substitutions into supplier schedule
+    supplier_sched2 = attach_substitutions(supplier_sched, supplier_summary)
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+
+        # Write raw sheets
+        supplier_sched2.to_excel(writer, sheet_name="Suppliers", index=False)
+        rep_sched.to_excel(writer, sheet_name="Representatives", index=False)
+
+        # Workbook + worksheets
+        wb = writer.book
+        ws_sup = writer.sheets["Suppliers"]
+        ws_rep = writer.sheets["Representatives"]
+
+        # -----------------------------
+        # STYLES
+        # -----------------------------
+        header_fmt = wb.add_format({
+            "bold": True,
+            "font_name": "Barlow",
+            "font_size": 12,
+            "align": "left",
+            "valign": "vcenter",
+            "font_color": "white",
+            "bg_color": "#5533FF",
+            "border": 1
+        })
+
+        cell_fmt = wb.add_format({
+            "font_name": "Barlow",
+            "font_size": 12,
+            "align": "left",
+            "valign": "vcenter",
+            "border": 1
+        })
+
+        money_fmt = wb.add_format({
+            "font_name": "Barlow",
+            "font_size": 12,
+            "align": "right",
+            "valign": "vcenter",
+            "border": 1,
+            "num_format": "$#,##0"
+        })
+
+        # SUPPLIERS SHEET
+        sup_df = supplier_sched2
+
+        for col_idx, col_name in enumerate(sup_df.columns):
+
+            # Write header
+            ws_sup.write(0, col_idx, col_name, header_fmt)
+
+            is_money = col_name in ["total_opportunity", "opportunity"]
+
+            for row_idx in range(1, len(sup_df) + 1):
+
+                val = sup_df.iloc[row_idx - 1, col_idx]
+
+                # --- Fix list types ---
+                if isinstance(val, list):
+                    val = ", ".join([str(x) for x in val])
+
+                # --- Clean NaN ---
+                if pd.isna(val):
+                    val = ""
+
+                # --- Apply formatting ---
+                if is_money:
+                    try:
+                        ws_sup.write_number(row_idx, col_idx, float(val), money_fmt)
+                    except:
+                        ws_sup.write(row_idx, col_idx, "", money_fmt)
+                else:
+                    ws_sup.write(row_idx, col_idx, val, cell_fmt)
+
+            # Auto width
+            max_width = max(
+                len(str(col_name)),
+                sup_df[col_name].astype(str).map(len).max()
+            )
+            ws_sup.set_column(col_idx, col_idx, min(max_width + 2, 40))
+
+        # REPRESENTATIVES SHEET
+        rep_df = rep_sched
+
+        for col_idx, col_name in enumerate(rep_df.columns):
+
+            ws_rep.write(0, col_idx, col_name, header_fmt)
+
+            for row_idx in range(1, len(rep_df) + 1):
+
+                val = rep_df.iloc[row_idx - 1, col_idx]
+
+                if isinstance(val, list):
+                    val = ", ".join([str(x) for x in val])
+
+                if pd.isna(val):
+                    val = ""
+
+                ws_rep.write(row_idx, col_idx, val, cell_fmt)
+
+            max_width = max(
+                len(str(col_name)),
+                rep_df[col_name].astype(str).map(len).max()
+            )
+            ws_rep.set_column(col_idx, col_idx, min(max_width + 2, 40))
+
+    return output.getvalue()
+
+
 
 
 def main():
@@ -31,9 +173,9 @@ def main():
 
         #### Source Data and Definitions
 
-        Supplier type and opportunity data come from the respective Supplier Growth Forum model outputs.  
-        The list of attending Sales Representatives comes from the *Internal MSC Invite List In Progress_19DESC.xlsx* provided by Leah Bacon on Dec. 23rd.  
-        Supplier meeting requests come from *Supplier Growth Forum Insights – Meeting Tracker*.
+        Supplier type and opportunity data come from the Supplier Growth Forum model outputs.  
+        The list of attending Sales Representatives comes from the MSC invite list from Leah Bacon updated on Jan. 6, 2026.  
+        Supplier meeting requests come from the Meeting Tracker and include each supplier's meeting number, topic, and preferred attendee type or region.
 
         Request cleaning follows these principles:  
         - Use explicit region or name requests when provided  
@@ -50,14 +192,16 @@ def main():
         When a rep appears too often, controlled substitutions are made:  
         - Key Leaders may be replaced with Region or District Leaders in the same segment  
         - Region Leaders may be replaced with District Leaders in the same region  
-        - District Leaders may be swapped with another District Leader in the same region, Reps that cannot be replaced are removed and marked as unavailable.
+        - District Leaders may be swapped with another District Leader in the same region Reps that cannot be replaced are removed and marked as unavailable.
 
-        Finally, suppliers are scheduled with Peak suppliers placed first, then Accelerating. Meetings are attempted in priority order and placed only when all reps are available, the supplier is free, and no workload limits are exceeded. Multiple internal configurations are tested automatically, and the solution with the fewest unscheduled meetings is returned.
+        Finally, suppliers are scheduled with Peak suppliers placed first, then Accelerating.  
+        Meetings are attempted in priority order and placed only when all reps are available, the supplier is free, and no workload limits are exceeded.  
+        Multiple internal configurations are tested automatically, and the solution with the fewest unscheduled meetings is returned.
 
         All processing happens locally in your browser session. 
 
         #### Support
-        For questions or assistance, contact *Kameel Dossal* or *Precision Business Solutions*  
+        For questions or assistance, contact **Precision Business Solutions**  
         """
     )
 
@@ -128,7 +272,7 @@ def main():
     # -------------------------------------------------------------------
     # Tabs
     # -------------------------------------------------------------------
-    tab_suppliers, tab_reps = st.tabs(["Supplier View", "Sales Rep View"])
+    tab_suppliers, tab_reps, tab_download = st.tabs(["Supplier View", "Sales Rep View", "Download"])
 
     # ============================================================
     # SUPPLIER TAB
@@ -157,7 +301,7 @@ def main():
                     summary_s = supplier_summary.get(supp, {})
 
                     pages.append(
-                        render_supplier_html(supp, booth_s, df_s, summary_s)
+                        render_supplier_html(supp, booth_s, df_s, summary_s, reps_df)
                     )
 
                 big_html = build_combined_html(pages)
@@ -188,9 +332,17 @@ def main():
             selected_supplier,
             booth_val,
             df_supplier,
+            supplier_summary[selected_supplier],
+            reps_df
+        )
+        st.components.v1.html(html_supplier, height=950, scrolling=True)
+
+        # Request summary table
+        summary_html_block = render_request_summary_table(
             supplier_summary[selected_supplier]
         )
-        st.components.v1.html(html_supplier, height=1100, scrolling=True)
+        st.components.v1.html(summary_html_block, height=400, scrolling=True)
+
 
     # ============================================================
     # REP TAB
@@ -238,10 +390,35 @@ def main():
         df_rep_selected = rep_sched[rep_sched["rep"] == selected_rep]
         html_rep = render_rep_html(selected_rep, df_rep_selected, suppliers_df, reps_df)
         st.components.v1.html(html_rep, height=1100, scrolling=True)
+    
+    # ============================================================
+    # DOWNLOAD TAB
+    # ============================================================
+    with tab_download:
+        st.subheader("Download Raw Schedule Outputs")
+
+        st.markdown("""
+        This export includes:
+        - **Suppliers**: the full supplier meeting schedule  
+        - **Representatives**: the full sales rep meeting schedule  
+        """)
+
+        # Build Excel when requested
+        excel_bytes = create_download_workbook(
+            supplier_sched,
+            rep_sched,
+            supplier_summary
+        )
+
+        st.download_button(
+            label="Download Scheduler Output (Excel)",
+            data=excel_bytes,
+            file_name="SGF_Schedule_Output.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+
 
 
 if __name__ == "__main__":
     main()
-
-
-
